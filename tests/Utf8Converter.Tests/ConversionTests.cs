@@ -217,6 +217,84 @@ public sealed class ConversionTests
     }
 
     [TestMethod]
+    [DataRow("cp932")]
+    [DataRow("ascii")]
+    [DataRow("binary")]
+    public void ProgressReportsIntermediateReadsForEveryProcessingStage(string kind)
+    {
+        var text = new string('a', 100000) + "日本語";
+        var bytes = kind == "cp932" ? Cp932.GetBytes(text) : new byte[200000];
+        if (kind == "ascii") Array.Fill(bytes, (byte)'a');
+        var path = Write("input", bytes);
+        var target = Path.Combine(root, "output");
+        var updates = new List<(string Stage, long Bytes, long Total)>();
+
+        var result = EncodingConverter.Process(path, target, kind != "binary",
+            progress: (stage, read, total) => updates.Add((stage, read, total)));
+
+        var expectedStages = kind switch
+        {
+            "cp932" => new[] { "UTF-8判定", "CP932判定", "変換", "文字列照合" },
+            "ascii" => new[] { "UTF-8判定", "CP932判定", "判定文字列比較", "コピー", "バイト照合" },
+            _ => new[] { "コピー", "バイト照合" }
+        };
+        foreach (var stage in expectedStages)
+        {
+            var reads = updates.Where(x => x.Stage == stage).ToArray();
+            Assert.IsTrue(reads.Length > 1, stage);
+            Assert.AreEqual(0L, reads[0].Bytes, stage);
+            Assert.IsTrue(reads.Any(x => x.Bytes > 0 && x.Bytes < bytes.Length), stage);
+            Assert.IsTrue(reads.All(x => x.Total == bytes.Length && x.Bytes <= x.Total), stage);
+            CollectionAssert.AreEqual(reads.Select(x => x.Bytes).Order().ToArray(), reads.Select(x => x.Bytes).ToArray(), stage);
+        }
+        Assert.AreEqual(kind == "cp932" ? FileAction.Converted : FileAction.Copied, result.Action);
+        CollectionAssert.AreEqual(kind == "cp932" ? StrictUtf8.GetBytes(text) : bytes, File.ReadAllBytes(target));
+        CollectionAssert.AreEqual(bytes, File.ReadAllBytes(path));
+    }
+
+    [TestMethod]
+    [DataRow("CP932判定")]
+    [DataRow("変換")]
+    [DataRow("文字列照合")]
+    [DataRow("コピー")]
+    [DataRow("バイト照合")]
+    public void CancellationFromIntermediateProgressRemovesPartialOutput(string stageToCancel)
+    {
+        var bytes = Cp932.GetBytes(new string('a', 100000) + "日本語");
+        var path = Write("input", bytes);
+        var target = Path.Combine(root, "output");
+        using var cancellation = new CancellationTokenSource();
+        var candidate = stageToCancel is not ("コピー" or "バイト照合");
+
+        Assert.ThrowsException<OperationCanceledException>(() => EncodingConverter.Process(path, target, candidate,
+            cancellation.Token, (stage, read, total) =>
+            {
+                if (stage == stageToCancel && read > 0 && read < total) cancellation.Cancel();
+            }));
+
+        Assert.IsFalse(File.Exists(target));
+        CollectionAssert.AreEqual(bytes, File.ReadAllBytes(path));
+    }
+
+    [TestMethod]
+    public void ProjectDisplaysIntermediateFileProgressAndKeepsIncompleteMarkerOnCancellation()
+    {
+        Write("large.cs", Cp932.GetBytes(new string('a', 100000) + "日本語"));
+        using var cancellation = new CancellationTokenSource();
+        var messages = new List<string>();
+        Assert.ThrowsException<OperationCanceledException>(() => ProjectConverter.Run(source, message =>
+        {
+            messages.Add(message);
+            if (message.Contains("読込 ") && !message.Contains("読込 0/")) cancellation.Cancel();
+            // 遅い表示先を再現し、実機の処理速度に依存せず表示間隔を経過させる。
+            if (message.StartsWith("処理中:") && !cancellation.IsCancellationRequested) Thread.Sleep(300);
+        }, cancellation.Token));
+
+        Assert.IsTrue(messages.Any(x => x.Contains("large.cs") && x.Contains("UTF-8判定: 読込 ") && !x.Contains("読込 0/")));
+        Assert.IsTrue(File.Exists(source + "_utf8.incomplete"));
+    }
+
+    [TestMethod]
     public void SeveralThousandFilesAreProcessedAndLogged()
     {
         for (var i = 0; i < 3000; i++) Write($"folder{i % 10}/file{i}.cs", Cp932.GetBytes("日本語\r\n"));

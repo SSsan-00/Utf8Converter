@@ -48,8 +48,8 @@ public static class ProjectConverter
         {
             if (force || watch.Elapsed - lastProgress >= TimeSpan.FromMilliseconds(250))
             {
-                progress?.Invoke(message);
                 lastProgress = watch.Elapsed;
+                progress?.Invoke(message);
             }
         }
         void Error(string path, string message)
@@ -106,10 +106,17 @@ public static class ProjectConverter
             {
                 token.ThrowIfCancellationRequested();
                 var relative = Path.GetRelativePath(source, entry.Path);
-                Progress($"処理中: {processed:N0}/{entries.Count:N0} ({(entries.Count == 0 ? 100 : processed * 100.0 / entries.Count):F1}%) / {processedBytes:N0}/{totalBytes:N0} bytes / {relative}");
+                var overall = $"処理中: {processed:N0}/{entries.Count:N0} ({(entries.Count == 0 ? 100 : processed * 100.0 / entries.Count):F1}%) / {processedBytes:N0}/{totalBytes:N0} bytes / {relative}";
+                Progress(overall, force: processed == 0);
                 try
                 {
-                    var result = EncodingConverter.Process(entry.Path, Path.Combine(output, relative), entry.Candidate, token);
+                    var result = EncodingConverter.Process(entry.Path, Path.Combine(output, relative), entry.Candidate, token,
+                        (stage, bytes, length) =>
+                        {
+                            // 読み込みごとに文字列を作らず、表示するときだけ整形する。
+                            if (progress is not null && watch.Elapsed - lastProgress >= TimeSpan.FromMilliseconds(250))
+                                Progress($"{overall} / {stage}: 読込 {bytes:N0}/{length:N0} bytes");
+                        });
                     if (result.Action == FileAction.Converted) converted++;
                     else copied++;
                     if (result.Action == FileAction.Unresolved) errors++;
