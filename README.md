@@ -10,12 +10,14 @@ Gitと.NET 9 SDKをインストールした環境で実行してください。
 ランタイムは同梱しません。生成物を別の環境へ移す場合は、publishフォルダ全体と.NET 9ランタイムが必要です。
 
 ```powershell
-git clone https://github.com/SSsan-00/Utf8Converter.git
-cd Utf8Converter
 dotnet test -c Release
 dotnet publish src/Utf8Converter/Utf8Converter.csproj -c Release --self-contained false -o ./publish
 .\publish\Utf8Converter.exe "C:\work\MyProject"
 ```
+
+上記はソースコードのルートフォルダで実行します。
+最後のコマンドは、生成したツールを起動し、例として指定した `C:\work\MyProject` 配下を再帰的に処理します。
+元ファイルは変更せず、隣の `C:\work\MyProject_utf8` にコピー・変換結果を生成します。パスは実際の対象フォルダに置き換えてください。
 
 更新時は `git pull` のあと、再度テストとpublishを実行します。
 SDKは `global.json` で.NET 9系を使用します。
