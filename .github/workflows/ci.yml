@@ -1,0 +1,16 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet test -c Release
+      - run: dotnet publish src/Utf8Converter/Utf8Converter.csproj -c Release --self-contained false -o ./publish
