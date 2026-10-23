@@ -8,6 +8,9 @@ public record RunResult(string OutputDirectory, string LogPath, int Converted, i
 
 public static class ProjectConverter
 {
+    // .cshtml.cs は最後の拡張子 .cs として対象に含まれる。
+    private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".cs", ".cshtml", ".json", ".css", ".txt", ".js", ".md", ".csproj", ".csc" };
     private record Entry(string Path, long Length);
 
     public static RunResult Run(string folder, Action<string>? progress = null, CancellationToken token = default)
@@ -106,7 +109,8 @@ public static class ProjectConverter
                 Progress(overall, force: processed == 0);
                 try
                 {
-                    var result = EncodingConverter.Process(entry.Path, Path.Combine(output, relative), true, token,
+                    var result = EncodingConverter.Process(entry.Path, Path.Combine(output, relative),
+                        Extensions.Contains(Path.GetExtension(entry.Path)), token,
                         (stage, bytes, length) =>
                         {
                             // 読み込みごとに文字列を作らず、表示するときだけ整形する。

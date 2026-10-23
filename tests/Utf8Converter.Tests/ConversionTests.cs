@@ -46,14 +46,12 @@ public sealed class ConversionTests
     [DataRow("Code.CS")]
     [DataRow("app.js")]
     [DataRow("app.css")]
-    [DataRow("index.html")]
     [DataRow("nested/deeper/settings.json")]
-    [DataRow("data.xml")]
-    [DataRow("app.config")]
     [DataRow("notes.txt")]
-    [DataRow("README")]
-    [DataRow("text.png")]
-    [DataRow("unknown.extension")]
+    [DataRow("README.md")]
+    [DataRow("project.csproj")]
+    [DataRow("compiler.csc")]
+    [DataRow("nested/deeper/Page.CsHtMl.CS")]
     public void Cp932ConversionPreservesEveryCharacterAndSource(string name)
     {
         var text = "日本語 髙 ①\r\n\t  空白 \n末尾\r";
@@ -139,9 +137,58 @@ public sealed class ConversionTests
     }
 
     [TestMethod]
+    public void EveryTargetExtensionReceivesBomForUtf8AsciiAndEmptyInput()
+    {
+        var extensions = new[] { "cs", "cshtml", "cshtml.cs", "json", "css", "txt", "js", "md", "csproj", "csc" };
+        var expected = new Dictionary<string, byte[]>();
+        foreach (var extension in extensions)
+        foreach (var suffix in new[] { extension, extension.ToUpperInvariant() })
+        foreach (var text in new[] { "", "ascii\r\n", "あ" })
+        {
+            var name = $"nested/deeper/{expected.Count}.{suffix}";
+            Write(name, StrictUtf8.GetBytes(text));
+            expected.Add(name, WithBom(text));
+        }
+        var result = ProjectConverter.Run(source);
+        Assert.AreEqual(0, result.Errors);
+        Assert.AreEqual(expected.Count, result.Converted);
+        Assert.AreEqual(0, result.Copied);
+        foreach (var (name, bytes) in expected)
+            CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(result.OutputDirectory, name)), name);
+    }
+
+    [TestMethod]
+    public void NonTargetFilesAreCopiedWithoutEncodingDetectionOrBomChanges()
+    {
+        var names = new[] { "README", "nested/index.html", "data.xml", "app.config", "image.png", "asset.bin", "unknown.extension", "code.cs.bak", "page.cshtml.cs.bak", "file.csx", "project.csprojx", "compiler.cscx" };
+        var inputs = new[] { Array.Empty<byte>(), StrictUtf8.GetBytes("ascii"), Cp932.GetBytes("日本語"), new byte[] { 0x81 }, new byte[] { 0xc2, 0xa9 }, WithBom("あ") };
+        var expected = new Dictionary<string, byte[]>();
+        foreach (var name in names)
+        for (var i = 0; i < inputs.Length; i++)
+        {
+            var relative = $"case{i}/{name}";
+            Write(relative, inputs[i]);
+            expected.Add(relative, inputs[i]);
+        }
+        var result = ProjectConverter.Run(source);
+        Assert.AreEqual(0, result.Errors);
+        Assert.AreEqual(0, result.Converted);
+        Assert.AreEqual(expected.Count, result.Copied);
+        Assert.IsFalse(File.Exists(result.OutputDirectory + ".incomplete"));
+        foreach (var (name, bytes) in expected)
+            CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(result.OutputDirectory, name)), name);
+        foreach (var line in File.ReadLines(result.LogPath))
+        {
+            using var item = JsonDocument.Parse(line);
+            if (item.RootElement.GetProperty("type").GetString() == "file")
+                Assert.AreEqual("対象外", item.RootElement.GetProperty("reason").GetString());
+        }
+    }
+
+    [TestMethod]
     public void TextInEveryDirectoryIsConvertedAndEmptyDirectoriesArePreserved()
     {
-        var names = new[] { ".git/config", ".vs/a.txt", "bin/a.cs", "obj/a.js", "node_modules/a.css", "nested/deep/README" };
+        var names = new[] { ".git/config.json", ".vs/a.txt", "bin/a.cs", "obj/a.js", "node_modules/a.css", "nested/deep/README.md" };
         foreach (var name in names) Write(name, Cp932.GetBytes("日本語\r\n"));
         Directory.CreateDirectory(Path.Combine(source, "empty/nested"));
         var result = ProjectConverter.Run(source);
@@ -157,10 +204,10 @@ public sealed class ConversionTests
     {
         source = Path.Combine(root, "bin");
         Directory.CreateDirectory(source);
-        Write("README", StrictUtf8.GetBytes("ascii"));
+        Write("README.md", StrictUtf8.GetBytes("ascii"));
         var result = ProjectConverter.Run(source);
         Assert.AreEqual(1, result.Converted);
-        CollectionAssert.AreEqual(WithBom("ascii"), File.ReadAllBytes(Path.Combine(result.OutputDirectory, "README")));
+        CollectionAssert.AreEqual(WithBom("ascii"), File.ReadAllBytes(Path.Combine(result.OutputDirectory, "README.md")));
     }
 
     [TestMethod]
@@ -179,7 +226,7 @@ public sealed class ConversionTests
         };
         foreach (var text in new[] { "", "日本語😀\r\n\t \n", "\ufeff先頭の文字としてのBOM" })
         {
-            var name = Guid.NewGuid().ToString("N");
+            var name = Guid.NewGuid().ToString("N") + ".txt";
             Write(name, encoding.GetPreamble().Concat(encoding.GetBytes(text)).ToArray());
         }
         var result = ProjectConverter.Run(source);
@@ -207,12 +254,12 @@ public sealed class ConversionTests
     [TestMethod]
     public void SecondRunDoesNotAddAnotherBom()
     {
-        Write("README", StrictUtf8.GetBytes("ascii\r\n"));
+        Write("README.md", StrictUtf8.GetBytes("ascii\r\n"));
         var first = ProjectConverter.Run(source);
         var second = ProjectConverter.Run(first.OutputDirectory);
         Assert.AreEqual(0, second.Errors);
         Assert.AreEqual(0, second.Converted);
-        CollectionAssert.AreEqual(WithBom("ascii\r\n"), File.ReadAllBytes(Path.Combine(second.OutputDirectory, "README")));
+        CollectionAssert.AreEqual(WithBom("ascii\r\n"), File.ReadAllBytes(Path.Combine(second.OutputDirectory, "README.md")));
     }
 
     [TestMethod]
