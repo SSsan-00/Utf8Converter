@@ -30,6 +30,8 @@ public sealed class ConversionTests
     [TestCleanup]
     public void Cleanup() => Directory.Delete(root, recursive: true);
 
+    private static byte[] WithBom(string text) => new byte[] { 0xef, 0xbb, 0xbf }.Concat(StrictUtf8.GetBytes(text)).ToArray();
+
     private string Write(string name, byte[] bytes)
     {
         var path = Path.Combine(source, name);
@@ -45,6 +47,13 @@ public sealed class ConversionTests
     [DataRow("app.js")]
     [DataRow("app.css")]
     [DataRow("index.html")]
+    [DataRow("nested/deeper/settings.json")]
+    [DataRow("data.xml")]
+    [DataRow("app.config")]
+    [DataRow("notes.txt")]
+    [DataRow("README")]
+    [DataRow("text.png")]
+    [DataRow("unknown.extension")]
     public void Cp932ConversionPreservesEveryCharacterAndSource(string name)
     {
         var text = "日本語 髙 ①\r\n\t  空白 \n末尾\r";
@@ -58,7 +67,7 @@ public sealed class ConversionTests
         Assert.AreEqual(0, result.Errors);
         Assert.AreEqual(1, result.Converted);
         var output = File.ReadAllBytes(Path.Combine(result.OutputDirectory, name));
-        CollectionAssert.AreEqual(StrictUtf8.GetBytes(text), output);
+        CollectionAssert.AreEqual(WithBom(text), output);
         CollectionAssert.AreEqual(bytes, File.ReadAllBytes(path));
         Assert.AreEqual(timestamp, File.GetLastWriteTimeUtc(Path.Combine(result.OutputDirectory, name)));
         Assert.IsFalse(File.Exists(result.OutputDirectory + ".incomplete"));
@@ -68,20 +77,25 @@ public sealed class ConversionTests
     [DataRow("")]
     [DataRow("ascii\r\n\t ")]
     [DataRow("あ")]
-    public void ExistingUtf8IsCopiedExactly(string text)
+    [DataRow("😀\r\n\t ")]
+    public void ExistingUtf8ReceivesBomWithoutChangingContent(string text)
     {
         var bytes = StrictUtf8.GetBytes(text);
         Write("x.cs", bytes);
         var result = ProjectConverter.Run(source);
         Assert.AreEqual(0, result.Errors);
-        Assert.AreEqual(0, result.Converted);
-        CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(result.OutputDirectory, "x.cs")));
+        Assert.AreEqual(1, result.Converted);
+        CollectionAssert.AreEqual(WithBom(text), File.ReadAllBytes(Path.Combine(result.OutputDirectory, "x.cs")));
+        CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(source, "x.cs")));
     }
 
     [TestMethod]
-    public void Utf8BomIsPreserved()
+    [DataRow("")]
+    [DataRow("日本語😀")]
+    [DataRow("\ufeff先頭の文字としてのBOM")]
+    public void Utf8BomIsPreserved(string text)
     {
-        var bytes = new byte[] { 0xef, 0xbb, 0xbf }.Concat(StrictUtf8.GetBytes("日本語😀")).ToArray();
+        var bytes = WithBom(text);
         Write("x.cshtml", bytes);
         var result = ProjectConverter.Run(source);
         Assert.AreEqual(0, result.Errors);
@@ -92,10 +106,10 @@ public sealed class ConversionTests
     [DataRow(new byte[] { 0xc2, 0xa9 })]
     [DataRow(new byte[] { 0x81 })]
     [DataRow(new byte[] { 0xef, 0xbb, 0xbf, 0xff })]
-    [DataRow(new byte[] { 0xff, 0xfe, 0x41, 0 })]
-    [DataRow(new byte[] { 0xfe, 0xff, 0, 0x41 })]
-    [DataRow(new byte[] { 0, 0, 0xfe, 0xff })]
-    [DataRow(new byte[] { 0xff, 0xfe, 0, 0 })]
+    [DataRow(new byte[] { 0xff, 0xfe, 0x41 })]
+    [DataRow(new byte[] { 0xfe, 0xff, 0 })]
+    [DataRow(new byte[] { 0, 0, 0xfe, 0xff, 0 })]
+    [DataRow(new byte[] { 0xff, 0xfe, 0, 0, 0, 0, 0x11, 0 })]
     public void UnresolvedInputIsCopiedButRunFails(byte[] bytes)
     {
         Write("x.cs", bytes);
@@ -110,7 +124,7 @@ public sealed class ConversionTests
     }
 
     [TestMethod]
-    public void OtherFilesAndSpecialDirectoriesAreCopiedExactly()
+    public void BinaryFilesAreCopiedExactlyRegardlessOfExtensionOrDirectory()
     {
         var bytes = new byte[] { 0, 0x81, 0xff, 0xfe, 13, 10 };
         var names = new[] { "image.png", "settings.json", ".git/config.cs", ".vs/a.cs", "bin/a.cs", "obj/a.js", "node_modules/a.css" };
@@ -122,6 +136,83 @@ public sealed class ConversionTests
         foreach (var name in names)
             CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(result.OutputDirectory, name)));
         Assert.IsTrue(Directory.Exists(Path.Combine(result.OutputDirectory, "empty/nested")));
+    }
+
+    [TestMethod]
+    public void TextInEveryDirectoryIsConvertedAndEmptyDirectoriesArePreserved()
+    {
+        var names = new[] { ".git/config", ".vs/a.txt", "bin/a.cs", "obj/a.js", "node_modules/a.css", "nested/deep/README" };
+        foreach (var name in names) Write(name, Cp932.GetBytes("日本語\r\n"));
+        Directory.CreateDirectory(Path.Combine(source, "empty/nested"));
+        var result = ProjectConverter.Run(source);
+        Assert.AreEqual(0, result.Errors);
+        Assert.AreEqual(names.Length, result.Converted);
+        foreach (var name in names)
+            CollectionAssert.AreEqual(WithBom("日本語\r\n"), File.ReadAllBytes(Path.Combine(result.OutputDirectory, name)));
+        Assert.IsTrue(Directory.Exists(Path.Combine(result.OutputDirectory, "empty/nested")));
+    }
+
+    [TestMethod]
+    public void RootWithPreviouslyExcludedNameIsAlsoConverted()
+    {
+        source = Path.Combine(root, "bin");
+        Directory.CreateDirectory(source);
+        Write("README", StrictUtf8.GetBytes("ascii"));
+        var result = ProjectConverter.Run(source);
+        Assert.AreEqual(1, result.Converted);
+        CollectionAssert.AreEqual(WithBom("ascii"), File.ReadAllBytes(Path.Combine(result.OutputDirectory, "README")));
+    }
+
+    [TestMethod]
+    [DataRow("utf16le")]
+    [DataRow("utf16be")]
+    [DataRow("utf32le")]
+    [DataRow("utf32be")]
+    public void UnicodeBomInputIsConvertedWithoutLosingTextOrAddingDuplicateBom(string kind)
+    {
+        Encoding encoding = kind switch
+        {
+            "utf16le" => new UnicodeEncoding(false, true, true),
+            "utf16be" => new UnicodeEncoding(true, true, true),
+            "utf32le" => new UTF32Encoding(false, true, true),
+            _ => new UTF32Encoding(true, true, true)
+        };
+        foreach (var text in new[] { "", "日本語😀\r\n\t \n", "\ufeff先頭の文字としてのBOM" })
+        {
+            var name = Guid.NewGuid().ToString("N");
+            Write(name, encoding.GetPreamble().Concat(encoding.GetBytes(text)).ToArray());
+        }
+        var result = ProjectConverter.Run(source);
+        Assert.AreEqual(0, result.Errors);
+        Assert.AreEqual(3, result.Converted);
+        foreach (var path in Directory.EnumerateFiles(source))
+        {
+            var original = File.ReadAllBytes(path);
+            var text = encoding.GetString(original, encoding.GetPreamble().Length, original.Length - encoding.GetPreamble().Length);
+            CollectionAssert.AreEqual(WithBom(text), File.ReadAllBytes(Path.Combine(result.OutputDirectory, Path.GetFileName(path))));
+        }
+    }
+
+    [TestMethod]
+    public void BinaryControlAfterFirstBufferPreventsConversion()
+    {
+        var bytes = Enumerable.Repeat((byte)'a', 100000).Append((byte)0).ToArray();
+        Write("looks-like-text.txt", bytes);
+        var result = ProjectConverter.Run(source);
+        Assert.AreEqual(0, result.Errors);
+        Assert.AreEqual(1, result.Copied);
+        CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(result.OutputDirectory, "looks-like-text.txt")));
+    }
+
+    [TestMethod]
+    public void SecondRunDoesNotAddAnotherBom()
+    {
+        Write("README", StrictUtf8.GetBytes("ascii\r\n"));
+        var first = ProjectConverter.Run(source);
+        var second = ProjectConverter.Run(first.OutputDirectory);
+        Assert.AreEqual(0, second.Errors);
+        Assert.AreEqual(0, second.Converted);
+        CollectionAssert.AreEqual(WithBom("ascii\r\n"), File.ReadAllBytes(Path.Combine(second.OutputDirectory, "README")));
     }
 
     [TestMethod]
@@ -198,17 +289,21 @@ public sealed class ConversionTests
         var outside = Path.Combine(root, "outside");
         Directory.CreateDirectory(outside);
         var link = Path.Combine(source, "link");
-        var start = new System.Diagnostics.ProcessStartInfo("cmd.exe")
+        if (OperatingSystem.IsWindows())
         {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        foreach (var argument in new[] { "/c", "mklink", "/J", link, outside }) start.ArgumentList.Add(argument);
-        using var process = System.Diagnostics.Process.Start(start)!;
-        process.WaitForExit();
-        Assert.AreEqual(0, process.ExitCode, process.StandardError.ReadToEnd());
+            var start = new System.Diagnostics.ProcessStartInfo("cmd.exe")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            foreach (var argument in new[] { "/c", "mklink", "/J", link, outside }) start.ArgumentList.Add(argument);
+            using var process = System.Diagnostics.Process.Start(start)!;
+            process.WaitForExit();
+            Assert.AreEqual(0, process.ExitCode, process.StandardError.ReadToEnd());
+        }
+        else Directory.CreateSymbolicLink(link, outside);
         var result = ProjectConverter.Run(source);
         Assert.AreEqual(1, result.Errors);
         Assert.IsFalse(Directory.Exists(Path.Combine(result.OutputDirectory, "link")));
@@ -235,7 +330,7 @@ public sealed class ConversionTests
         var expectedStages = kind switch
         {
             "cp932" => new[] { "UTF-8判定", "CP932判定", "変換", "文字列照合" },
-            "ascii" => new[] { "UTF-8判定", "CP932判定", "判定文字列比較", "コピー", "バイト照合" },
+            "ascii" => new[] { "バイナリ判定", "UTF-8判定", "CP932判定", "判定文字列比較", "変換", "文字列照合" },
             _ => new[] { "コピー", "バイト照合" }
         };
         foreach (var stage in expectedStages)
@@ -247,12 +342,13 @@ public sealed class ConversionTests
             Assert.IsTrue(reads.All(x => x.Total == bytes.Length && x.Bytes <= x.Total), stage);
             CollectionAssert.AreEqual(reads.Select(x => x.Bytes).Order().ToArray(), reads.Select(x => x.Bytes).ToArray(), stage);
         }
-        Assert.AreEqual(kind == "cp932" ? FileAction.Converted : FileAction.Copied, result.Action);
-        CollectionAssert.AreEqual(kind == "cp932" ? StrictUtf8.GetBytes(text) : bytes, File.ReadAllBytes(target));
+        Assert.AreEqual(kind != "binary" ? FileAction.Converted : FileAction.Copied, result.Action);
+        CollectionAssert.AreEqual(kind == "binary" ? bytes : WithBom(kind == "cp932" ? text : new string('a', bytes.Length)), File.ReadAllBytes(target));
         CollectionAssert.AreEqual(bytes, File.ReadAllBytes(path));
     }
 
     [TestMethod]
+    [DataRow("バイナリ判定")]
     [DataRow("CP932判定")]
     [DataRow("変換")]
     [DataRow("文字列照合")]
@@ -290,7 +386,7 @@ public sealed class ConversionTests
             if (message.StartsWith("処理中:") && !cancellation.IsCancellationRequested) Thread.Sleep(300);
         }, cancellation.Token));
 
-        Assert.IsTrue(messages.Any(x => x.Contains("large.cs") && x.Contains("UTF-8判定: 読込 ") && !x.Contains("読込 0/")));
+        Assert.IsTrue(messages.Any(x => x.Contains("large.cs") && x.Contains("バイナリ判定: 読込 ") && !x.Contains("読込 0/")));
         Assert.IsTrue(File.Exists(source + "_utf8.incomplete"));
     }
 

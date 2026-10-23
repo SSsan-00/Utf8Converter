@@ -4,7 +4,7 @@ using Utf8Converter;
 Console.OutputEncoding = new UTF8Encoding(false);
 if (args.Length == 1 && args[0] is "--help" or "-h")
 {
-    Console.WriteLine("使い方: Utf8Converter <フォルダパス>\n元ファイルを保持し、隣の <名前>_utf8 に検証済みの結果を生成します。");
+    Console.WriteLine("使い方: Utf8Converter <フォルダパス>\n拡張子に関係なく再帰的にテキストをBOM付きUTF-8に変換します。\n元ファイルを保持し、隣の <名前>_utf8 に検証済みの結果を生成します。");
     return 0;
 }
 if (args.Length != 1)

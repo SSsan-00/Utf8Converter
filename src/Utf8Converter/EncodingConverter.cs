@@ -8,6 +8,8 @@ public record ConversionResult(FileAction Action, string Reason);
 public static class EncodingConverter
 {
     private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
+    private static readonly Encoding Utf8Bom = new UTF8Encoding(true, true);
+    private record Plan(FileAction Action, string Reason, Encoding? SourceEncoding = null, int SourceOffset = 0);
     private static readonly Encoding Cp932 = CreateCp932();
 
     private static Encoding CreateCp932()
@@ -24,7 +26,7 @@ public static class EncodingConverter
         var originalLength = input.Length;
         void Report(string stage, long bytes) => progress?.Invoke(stage, bytes, originalLength);
         var originalWriteTime = File.GetLastWriteTimeUtc(source);
-        var result = candidate ? Classify(input, cancellationToken, Report) : new(FileAction.Copied, "対象外");
+        var result = candidate ? Classify(input, cancellationToken, Report) : new Plan(FileAction.Copied, "対象外");
         var outputCreated = false;
         try
         {
@@ -35,8 +37,9 @@ public static class EncodingConverter
                 if (result.Action == FileAction.Converted)
                 {
                     Report("変換", 0);
-                    using (var reader = Reader(input, Cp932))
-                    using (var writer = new StreamWriter(output, Utf8, 16384, leaveOpen: true))
+                    input.Position = result.SourceOffset;
+                    using (var reader = Reader(input, result.SourceEncoding!))
+                    using (var writer = new StreamWriter(output, Utf8Bom, 16384, leaveOpen: true))
                     {
                         var chars = new char[16384];
                         int count;
@@ -48,7 +51,8 @@ public static class EncodingConverter
                         }
                     }
                     output.Flush();
-                    if (!SameText(input, Cp932, output, Utf8, cancellationToken, bytes => Report("文字列照合", bytes)))
+                    if (!SameText(input, result.SourceEncoding!, output, Utf8, cancellationToken, bytes => Report("文字列照合", bytes),
+                        leftOffset: result.SourceOffset, rightOffset: 3))
                         throw new IOException("変換前後の文字列が一致しません。");
                 }
                 else
@@ -70,7 +74,7 @@ public static class EncodingConverter
                     throw new IOException("処理中に入力ファイルが変更されました。");
             }
             File.SetLastWriteTimeUtc(destination, originalWriteTime);
-            return result;
+            return new(result.Action, result.Reason);
         }
         catch
         {
@@ -80,7 +84,7 @@ public static class EncodingConverter
         }
     }
 
-    private static ConversionResult Classify(FileStream input, CancellationToken token, Action<string, long> report)
+    private static Plan Classify(FileStream input, CancellationToken token, Action<string, long> report)
     {
         Span<byte> header = stackalloc byte[4];
         input.Position = 0;
@@ -89,32 +93,63 @@ public static class EncodingConverter
             return Valid(input, Utf8, token, bytes => report("UTF-8判定", bytes))
                 ? new(FileAction.Copied, "UTF-8（BOMあり）")
                 : new(FileAction.Unresolved, "UTF-8 BOMがありますが内容が不正です。");
-        if ((count >= 2 && (header[..2].SequenceEqual(new byte[] { 0xff, 0xfe }) ||
-                           header[..2].SequenceEqual(new byte[] { 0xfe, 0xff }))) ||
-            (count >= 4 && header.SequenceEqual(new byte[] { 0, 0, 0xfe, 0xff })))
-            return new(FileAction.Unresolved, "UTF-16/UTF-32は対象外です。");
+
+        // UTF-32 LEのBOMはUTF-16 LEと同じ2バイトで始まるため、先に判定する。
+        Encoding? unicode = null;
+        var preambleLength = 0;
+        if (count >= 4 && header.SequenceEqual(new byte[] { 0xff, 0xfe, 0, 0 }))
+        { unicode = new UTF32Encoding(false, false, true); preambleLength = 4; }
+        else if (count >= 4 && header.SequenceEqual(new byte[] { 0, 0, 0xfe, 0xff }))
+        { unicode = new UTF32Encoding(true, false, true); preambleLength = 4; }
+        else if (count >= 2 && header[..2].SequenceEqual(new byte[] { 0xff, 0xfe }))
+        { unicode = new UnicodeEncoding(false, false, true); preambleLength = 2; }
+        else if (count >= 2 && header[..2].SequenceEqual(new byte[] { 0xfe, 0xff }))
+        { unicode = new UnicodeEncoding(true, false, true); preambleLength = 2; }
+        if (unicode is not null)
+            return Valid(input, unicode, token, bytes => report("Unicode判定", bytes), preambleLength)
+                ? new(FileAction.Converted, "BOM付きUTF-16/UTF-32 → UTF-8（BOMあり）", unicode, preambleLength)
+                : new(FileAction.Unresolved, "UTF-16/UTF-32 BOMがありますが内容が不正です。");
+
+        // 拡張子には依存せず、全体を走査してバイナリの制御バイトを検出する。
+        if (HasBinaryControls(input, token, bytes => report("バイナリ判定", bytes)))
+            return new(FileAction.Copied, "バイナリと判定（制御バイトあり）");
 
         var utf8 = Valid(input, Utf8, token, bytes => report("UTF-8判定", bytes));
         var cp932 = Valid(input, Cp932, token, bytes => report("CP932判定", bytes));
         if (utf8 && cp932)
         {
-            // 同じストリームを別々の位置で読むため、比較用にもう一度開く。
             using var other = new FileStream(input.Name, FileMode.Open, FileAccess.Read, FileShare.Read);
             return SameText(input, Utf8, other, Cp932, token, bytes => report("判定文字列比較", bytes))
-                ? new(FileAction.Copied, "UTF-8/CP932の文字列一致")
+                ? new(FileAction.Converted, "UTF-8/CP932の文字列一致 → UTF-8（BOMあり）", Utf8)
                 : new(FileAction.Unresolved, "UTF-8とCP932の両方で成立し、文字列が異なります。");
         }
-        if (utf8) return new(FileAction.Copied, "UTF-8（BOMなし）");
-        if (cp932) return new(FileAction.Converted, "CP932 → UTF-8（BOMなし）");
+        if (utf8) return new(FileAction.Converted, "UTF-8（BOMなし） → UTF-8（BOMあり）", Utf8);
+        if (cp932) return new(FileAction.Converted, "CP932 → UTF-8（BOMあり）", Cp932);
         return new(FileAction.Unresolved, "UTF-8/CP932のどちらとしても不正です。");
+    }
+
+    private static bool HasBinaryControls(Stream input, CancellationToken token, Action<long> progress)
+    {
+        input.Position = 0;
+        progress(0);
+        var buffer = new byte[65536];
+        int count;
+        while ((count = input.Read(buffer)) != 0)
+        {
+            token.ThrowIfCancellationRequested();
+            progress(input.Position);
+            foreach (var value in buffer.AsSpan(0, count))
+                if (value is < 9 or 11 or (>= 14 and < 32) or 127) return true;
+        }
+        return false;
     }
 
     private static StreamReader Reader(Stream stream, Encoding encoding) =>
         new(stream, encoding, detectEncodingFromByteOrderMarks: false, bufferSize: 16384, leaveOpen: true);
 
-    private static bool Valid(Stream input, Encoding encoding, CancellationToken token, Action<long> progress)
+    private static bool Valid(Stream input, Encoding encoding, CancellationToken token, Action<long> progress, int offset = 0)
     {
-        input.Position = 0;
+        input.Position = offset;
         progress(0);
         using var reader = Reader(input, encoding);
         var buffer = new char[16384];
@@ -131,9 +166,10 @@ public static class EncodingConverter
     }
 
     private static bool SameText(Stream left, Encoding leftEncoding, Stream right, Encoding rightEncoding,
-        CancellationToken token, Action<long> progress)
+        CancellationToken token, Action<long> progress, int leftOffset = 0, int rightOffset = 0)
     {
-        left.Position = right.Position = 0;
+        left.Position = leftOffset;
+        right.Position = rightOffset;
         progress(0);
         using var a = Reader(left, leftEncoding);
         using var b = Reader(right, rightEncoding);

@@ -8,11 +8,7 @@ public record RunResult(string OutputDirectory, string LogPath, int Converted, i
 
 public static class ProjectConverter
 {
-    private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
-        { ".cs", ".cshtml", ".js", ".css", ".html" };
-    private static readonly HashSet<string> CopyOnlyDirectories = new(StringComparer.OrdinalIgnoreCase)
-        { ".git", ".vs", "bin", "obj", "node_modules" };
-    private record Entry(string Path, bool Candidate, long Length);
+    private record Entry(string Path, long Length);
 
     public static RunResult Run(string folder, Action<string>? progress = null, CancellationToken token = default)
     {
@@ -57,7 +53,7 @@ public static class ProjectConverter
             errors++;
             Log(new { type = "error", path, message });
         }
-        void Scan(string directory, bool copyOnly)
+        void Scan(string directory)
         {
             token.ThrowIfCancellationRequested();
             Progress($"集計中: {entries.Count:N0} ファイル / {Path.GetRelativePath(source, directory)}");
@@ -77,9 +73,9 @@ public static class ProjectConverter
                         if ((attributes & FileAttributes.Directory) != 0)
                         {
                             directories.Add(Path.GetRelativePath(source, path));
-                            Scan(path, copyOnly || CopyOnlyDirectories.Contains(Path.GetFileName(path)));
+                            Scan(path);
                         }
-                        else entries.Add(new(path, !copyOnly && Extensions.Contains(Path.GetExtension(path)), new FileInfo(path).Length));
+                        else entries.Add(new(path, new FileInfo(path).Length));
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     { Error(Path.GetRelativePath(source, path), ex.Message); }
@@ -91,7 +87,7 @@ public static class ProjectConverter
 
         try
         {
-            Scan(source, CopyOnlyDirectories.Contains(Path.GetFileName(source)));
+            Scan(source);
             foreach (var directory in directories)
             {
                 token.ThrowIfCancellationRequested();
@@ -110,7 +106,7 @@ public static class ProjectConverter
                 Progress(overall, force: processed == 0);
                 try
                 {
-                    var result = EncodingConverter.Process(entry.Path, Path.Combine(output, relative), entry.Candidate, token,
+                    var result = EncodingConverter.Process(entry.Path, Path.Combine(output, relative), true, token,
                         (stage, bytes, length) =>
                         {
                             // 読み込みごとに文字列を作らず、表示するときだけ整形する。
